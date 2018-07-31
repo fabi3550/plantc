@@ -11,27 +11,43 @@ import network
 import time
 import urequests
 import ujson
+import machine
 
 class PlantClient(object):
 
     def __init__(self):
 
-        self.configuration = self.readConfiguration()
-        print(type(self.configuration))
+        # init adc (water level)
+        self.a0 = machine.ADC(0)
 
-        sensor_data = self.readSensorData()
+        # init real time clock
+        self.rtc = machine.RTC()
 
-        if len(sensor_data) > 0:
-            self.wifi_object = self.connectToWIFI(
-                self.configuration["WifiSSID"],
-                self.configuration["WifiPassword"]
-            )
+        # setting irq to rtc
+        self.rtc.irq(trigger=self.rtc.ALARM0, wake=machine.DEEPSLEEP)
 
-            if self.wifi_object.isconnected():
-                self.postSensorData(sensor_data)
+        while True:
+
+            self.configuration = self.readConfiguration()
+            sensor_data = self.readSensorData()
+
+            if len(sensor_data) > 0:
+                self.wifi_object = self.connectToWIFI(
+                    self.configuration["WifiSSID"],
+                    self.configuration["WifiPassword"]
+                )
+
+                if self.wifi_object.isconnected():
+                    self.postSensorData(sensor_data)
 
                 if self.disconnectWIFI():
-                    time.sleep(self.configuration["TimeForDeepSleep"])
+                    print("Sleeping " + str(self.configuration["TimeForDeepSleep"]) + " seconds")
+
+                    # configures alarm trigger
+                    self.rtc.alarm(self.rtc.ALARM0, (self.configuration["TimeForDeepSleep"] * 1000))
+
+                    # going in deep sleep mode
+                    machine.deepsleep()
             else:
                 # maybe store sensor data with timestamp locally to send it later
                 pass
@@ -66,7 +82,7 @@ class PlantClient(object):
 
         print("Disconnecting WIFI...")
         self.wifi_object.disconnect()
-        return self.wifi_object.isconnected()
+        return not self.wifi_object.isconnected()
 
     # reads data from the chirp sensor and returns a dict object
     # with all relevant information
@@ -82,6 +98,7 @@ class PlantClient(object):
         data["light"] = light
         data["temperature"] = temperature
         data["capacity"] = capacity
+        data["waterlevel"] = self.a0.read()
 
         return data
 
@@ -101,6 +118,9 @@ class PlantClient(object):
         except OSError as e:
             print(e)
 
+        except ValueError as e:
+            print(e)
+
     # reads the plantc.conf in the local filesystem
     def readConfiguration(self):
 
@@ -109,6 +129,7 @@ class PlantClient(object):
         try:
             f = open("plantc.conf", "r")
             config = ujson.loads(f.read())
+            f.close()
 
         except OSError as e:
             print(e)
