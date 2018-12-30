@@ -17,8 +17,21 @@ class PlantClient(object):
 
     def __init__(self):
 
-        # init adc (water level)
-        self.a0 = machine.ADC(0)
+        self.config = {}
+
+        try:
+
+            # read configuration file
+            self.configuration = self.readConfiguration()
+
+        except ValueError as e:
+            print("Error in configuration data")
+
+        if "waterlevel" in self.config["sensors"]:
+
+            # init adc (water level)
+            waterlevel_pin = self.config["sensors"]["waterlevel"]["pin"]
+            self.a0 = machine.ADC(waterlevel_pin)
 
         # init real time clock
         self.rtc = machine.RTC()
@@ -28,13 +41,12 @@ class PlantClient(object):
 
         while True:
 
-            self.configuration = self.readConfiguration()
             sensor_data = self.readSensorData()
 
             if len(sensor_data) > 0:
                 self.wifi_object = self.connectToWIFI(
-                    self.configuration["WifiSSID"],
-                    self.configuration["WifiPassword"]
+                    self.configuration["network"]["WifiSSID"],
+                    self.configuration["network"]["WifiPassword"]
                 )
 
                 if self.wifi_object.isconnected():
