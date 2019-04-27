@@ -12,117 +12,131 @@ import time
 import urequests
 import ujson
 import machine
+import math
+import network
+import ubinascii
+from uhashlib import sha256
+from plant_unit import Sensor, WaterPump, WateringUnit
 
 class PlantClient(object):
 
     def __init__(self):
 
-        self.config = {}
+        self.isactive = True
 
         try:
 
             # read configuration file
             self.configuration = self.readConfiguration()
 
+            # init watering unit components
+            self.wateringunit = WateringUnit(self.configuration["units"][0])
+
         except ValueError as e:
+            self.setActive(False)
             print("Error in configuration data")
 
-        if "waterlevel" in self.config["sensors"]:
+        except KeyError as e:
+            self.setActive(False)
+            print("Error in configuration data")
 
-            # init adc (water level)
-            waterlevel_pin = self.config["sensors"]["waterlevel"]["pin"]
-            self.a0 = machine.ADC(waterlevel_pin)
 
-        # init real time clock
-        self.rtc = machine.RTC()
-
-        # setting irq to rtc
-        self.rtc.irq(trigger=self.rtc.ALARM0, wake=machine.DEEPSLEEP)
-
-        while True:
-
+        while self.isActive():
             sensor_data = self.readSensorData()
 
-            if len(sensor_data) > 0:
-                self.wifi_object = self.connectToWIFI(
-                    self.configuration["network"]["WifiSSID"],
-                    self.configuration["network"]["WifiPassword"]
-                )
+            self.wifi_object = self.connectToWIFI(
+                self.configuration["network"]["WifiSSID"],
+                self.configuration["network"]["WifiPassword"]
+            )
 
-                if self.wifi_object.isconnected():
-                    self.postSensorData(sensor_data)
+            if self.wifi_object.isconnected():
+                response = self.postSensorData(sensor_data)
 
-                if self.disconnectWIFI():
-                    print("Sleeping " + str(self.configuration["TimeForDeepSleep"]) + " seconds")
+                if (response.status_code == 200):
+                    action = response.json()['action']
 
-                    # configures alarm trigger
-                    self.rtc.alarm(self.rtc.ALARM0, (self.configuration["TimeForDeepSleep"] * 1000))
+                    if action == 'REGISTER':
+                        self.postRegistration()
 
-                    # going in deep sleep mode
-                    machine.deepsleep()
-            else:
-                # maybe store sensor data with timestamp locally to send it later
-                pass
+                    elif action == 'PUMP':
+                        duration = int(response.json()['duration'])
+                        self.wateringunit.getWaterPump().pumpWater(duration)
+
+                    elif action == 'DENIED':
+                        self.setActive(False)
+
+            if self.disconnectWIFI():
+                print("Sleeping " + str(self.configuration["network"]["TimeForDeepSleep"]) + " seconds")
+
+                # going in deep sleep mode
+                machine.deepsleep(self.configuration["network"]["TimeForDeepSleep"] * 1000)
 
 
+    # determines if client is set active
+    def isActive(self):
+        return self.active
+
+
+    # setter variable for client activity
+    def setActive(self, bool):
+        self.active = bool
 
     # inits a WIFI connection an returns it
     def connectToWIFI(self, ssid, password):
 
         print("Connecting to WIFI " + ssid)
-        station_adapter = network.WLAN(network.STA_IF)
 
         try:
+            station_adapter = network.WLAN(network.STA_IF)
+            station_adapter.active(True)
             station_adapter.connect(ssid, password)
-        except OSerror as e:
+
+            timeout = self.configuration["network"]["WifiConnectionTimeout"]
+            interval = 0.5
+
+            while not station_adapter.isconnected():
+                timeout -= interval
+                time.sleep(interval)
+                if timeout <= 0:
+                    print("Connection timed out")
+                    break
+        except OSError as e:
             print(e)
 
-        timeout = self.configuration["WifiConnectionTimeout"]
-        interval = 0.5
-
-        while not station_adapter.isconnected():
-            timeout -= interval
-            time.sleep(interval)
-            if timeout <= 0:
-                print("Connection timed out")
-                break
-
         return station_adapter
+
 
     # disconnects from WIFI
     def disconnectWIFI(self):
 
         print("Disconnecting WIFI...")
         self.wifi_object.disconnect()
-        return not self.wifi_object.isconnected()
+        return self.wifi_object.isconnected()
+
 
     # reads data from the chirp sensor and returns a dict object
     # with all relevant information
     def readSensorData(self):
-
         data = {}
 
-        # some magic happens and then there was data...
-        light = 1005
-        temperature = 18.9
-        capacity = 245
+        # collect sensor data from all sensors listed in plantc.conf
+        for sensor in self.configuration["sensors"]:
+            sensorname = sensor["sensorname"]
+            data[sensorname] = self.getAvgTouchValue(sensor["pin"], 1000, 10)
 
-        data["light"] = light
-        data["temperature"] = temperature
-        data["capacity"] = capacity
-        data["waterlevel"] = self.a0.read()
+        # sign with sha256 hash of the clients mac address
+        data['client'] = self.getClientHash()
 
         return data
 
+
     # posts the data from the sensor as json object via http to the given host
     def postSensorData(self, data):
-
-        print("Posting sensor data")
         response = 0
 
         try:
             response = urequests.post(
-                self.configuration["HttpHost"] + ":" + str(self.configuration["HttpPort"]),
+                ''.join('%s:%s' % (self.configuration["host"]["HttpHost"], str(self.configuration["host"]["HttpPort"]))),
                 json = data,
                 headers = {"Content-Type": "application/json"}
             )
@@ -133,13 +147,71 @@ class PlantClient(object):
         except ValueError as e:
             print(e)
 
+        return response
+
+
+    # unknown clients in an old installation with multiple plant clients
+    # will be asked for registration
+    def postRegistration(self):
+        response = 0
+
+        data = {'mac': self.getMacAddress()}
+
+        try:
+
+            response = urequests.post(
+                ''.join('%s:%s/register' % (self.configuration["host"]["HttpHost"], str(self.configuration["host"]["HttpPort"]))),
+                json = data,
+                headers = {"Content-Type": "application/json"}
+            )
+
+        except OSError as e:
+            print(e)
+
+        except ValueError as e:
+            print(e)
+
+        return response
+
+
+    # +++++ Function getAvgTouchValue +++++
+
+    # --> pin is gpio number of touchpad input
+    # --> total is time of measurement in milliseconds
+    # --> interval is interval bewtween meausurents in milliseconds
+    # <-- returns an average value of the measurements within total
+
+    def getAvgTouchValue(self, pin, total, interval):
+
+        # verify that total and interval are valid
+        if total > interval:
+            if (total % interval) == 0:
+                measurements = total/interval
+            else:
+                measurements = (total/interval) + 1
+
+            # accessing touchpad pin
+            touch = machine.TouchPad(machine.Pin(pin))
+
+            sum_touchvalues = 0
+            sum_measurements = measurements
+
+            while measurements > 0:
+
+                touchvalue = touch.read()
+                sum_touchvalues += touchvalue
+                time.sleep(interval/1000)
+                measurements -= 1
+
+            return math.floor(sum_touchvalues/sum_measurements)
+
+
     # reads the plantc.conf in the local filesystem
     def readConfiguration(self):
-
         config = {}
 
         try:
-            f = open("plantc.conf", "r")
+            f = open("plantc.json", "r")
             config = ujson.loads(f.read())
             f.close()
 
@@ -147,3 +219,16 @@ class PlantClient(object):
             print(e)
 
         return config
+
+
+    # returs the mac address of the wifi card
+    def getMacAddress(self):
+        return ubinascii.hexlify(network.WLAN().config('mac')).decode()
+
+
+    # returns the sha256 hash of the clients mac address
+    def getClientHash(self):
+        mac = self.getMacAddress()
+        hash = sha256(mac)
+        hashstring = ''.join(['{:02x}'.format(b) for b in hash.digest()])
+        return hashstring
