@@ -1,0 +1,39 @@
+{
+  "wifi":
+  {
+    "WifiSSID": "your_wifi_ssid",
+    "WifiPassword": "your_wifi_password",
+    "WifiConnectionTimeout": 10,
+    "TimeForDeepSleep": 60
+  },
+  "host":
+    {
+      "HttpHost": "http://raspberripi",
+      "HttpPort": 5000
+    },
+  "units": [
+    {
+    "unit": {
+      "sensors": [
+        {
+          "moisture": {
+            "pin": 32,
+            "lower_bias": 250,
+            "upper_bias": 500
+            }
+        },
+        {
+          "waterlevel": {
+            "pin": 33,
+            "lower_bias": 250
+            }
+        }
+    ],
+      "pump": {
+        "pin": 15,
+        "pwd_level": 0.75
+        }
+      }
+    }
+  ]
+}
